@@ -21,38 +21,34 @@ function create_section(type) {
 function apply_changes(ctx, named, type) {
 	let section = create_section(type);
 
-	if (length(named) == 0) {
-		cursor.save('firewall');
-		return ctx.ok('Unnamed section added.');
-	}
+	if (!section)
+		return ctx.command_failed('Unable to create firewall section');
 
 	for (let key in keys(named)) {
 		let value = named[key];
 		let success = cursor.set('firewall', section, key, value);
-		cursor.save('firewall');
+
 		if (!success)
 			return ctx.command_failed('Change %s.%s.%s=%s not applied',
 				'firewall', section, key, value);
 	}
 
-	return ctx.ok('Changes applied');
+	cursor.save('firewall');
+	return ctx.ok('Changes staged');
 }
 
 function parseCidr (cidr, type) {
-	let m = split(cidr, '/', 2);
+	let m = match(cidr, /^(.+)\/([0-9]{1,3})$/);
 
-	switch (type) {
-		case 'cidr4':
-			if (m && +m[1] <= 32 && length(iptoarr(m[0])) == 4)
-				return true;
-			else
-				return false;
-		default: 
-			if (m && +m[1] <= 128 && length(iptoarr(m[0])) == 16)
-				return true;
-			else
-				return false;
-	}
+	if (!m)
+		return false;
+
+	let mask = int(m[2]);
+
+	if (type == 'cidr4')
+		return mask <= 32 && length(iptoarr(m[1])) == 4;
+
+	return mask <= 128 && length(iptoarr(m[1])) == 16;
 }
 
 function validateEnabled (enabled) {
@@ -66,6 +62,47 @@ function parseMac (mac) {
 	if (length(arr) != 6 || length(filter(arr, (v) => !match(v, /^[0-9a-f][0-9a-f]$/))))
 		return false;
 	return true;
+}
+
+function validate_list(value, validate) {
+	if (type(value) == 'array')
+		value = join(' ', value);
+
+	if (!value)
+		return false;
+
+	let count = 0;
+
+	for (let entry in split(value, /[ \t]+/)) {
+		if (!length(entry))
+			continue;
+
+		if (substr(entry, 0, 1) == '!')
+			entry = substr(entry, 1);
+
+		if (!length(entry) || !validate(entry))
+			return false;
+
+		count++;
+	}
+
+	return count > 0;
+}
+
+function validateMac(mac) {
+	return validate_list(mac, parseMac);
+}
+
+function normalize_list(value) {
+	let ret = [];
+	let values = type(value) == 'array' ? value : [ value ];
+
+	for (let item in values)
+		for (let entry in split(item, /[ \t]+/))
+			if (length(entry))
+				push(ret, entry);
+
+	return ret;
 }
 
 function validateTime (time) {
@@ -150,8 +187,8 @@ function validateLimit (limit) {
 	return true;
 }
 
-function validateIP (ip) {
-	let mv4, mv6, ipv4, ipv6, mask, valid_mask;
+function validateIPValue(ip) {
+	let mv4, mv6, ipv4, ipv6, mask;
 
 	mv4 = match(ip, /^([0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3})([/-]?([0-9]{1,2}))?$/);
 	mv6 = match(ip, /^([0-9a-fA-F:.]+)([/-]?([0-9]{1,3}))?$/);
@@ -159,17 +196,15 @@ function validateIP (ip) {
 	if (!mv4 && !mv6)
 		return false;
 
-	if(mv4) {
+	if (mv4) {
 		ipv4 = iptoarr(mv4[1]);
 
 		if (!ipv4)
 			return false;
 
 		mask = mv4[3];
-		if (mask) {
-			if (int(mask) < 0 || int(mask) > 32)
-				return false;
-		}
+		if (mask && (int(mask) < 0 || int(mask) > 32))
+			return false;
 	}
 	else {
 		ipv6 = iptoarr(mv6[1]);
@@ -178,16 +213,18 @@ function validateIP (ip) {
 			return false;
 
 		mask = mv6[3];
-		if (mask) {
-
-			if (int(mask < 0) || int(mask) > 128))
-				return false;
-		}
+		if (mask && (int(mask) < 0 || int(mask) > 128))
+			return false;
 	}
+
 	return true;
 }
 
-function validatePort(port) {
+function validateIP(ip) {
+	return validate_list(ip, validateIPValue);
+}
+
+function validatePortValue(port) {
 	let m;
 
 	if (!port)
@@ -208,13 +245,17 @@ function validatePort(port) {
 			return false;
 	}
 	else {
-	let pn = +m[1];
+		let pn = +m[1];
 
-	if (pn < 0 || pn > 65535)
-		return false;
+		if (pn < 0 || pn > 65535)
+			return false;
 	}
 
 	return true;
+}
+
+function validatePort(port) {
+	return validate_list(port, validatePortValue);
 }
 
 function validateMonthdays (md) {
@@ -242,26 +283,23 @@ function validateMonthdays (md) {
 	return true;
 }
 
-function validateWeekdays (wd) {
-	let m;
-	const weekdays = [ 'mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun' ];
+function validateWeekday(day) {
+	const weekdays = [ 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday' ];
 
-	if (!wd)
+	if (!length(day))
 		return false;
 
-	m = match(wd, /^!?(.*)$/);
+	day = lc(day);
 
-	if (!m)
-		return false;
+	for (let weekday in weekdays)
+		if (substr(weekday, 0, length(day)) == day)
+			return true;
 
-	for (let day in split(m[1], ' ')) {
-		let valid = index(weekdays, day) >= 0 ? true : false;
-		
-		if (!valid)
-			return false;
-	}
+	return false;
+}
 
-	return true;
+function validateWeekdays(wd) {
+	return validate_list(wd, validateWeekday);
 }
 
 function add_defaults_option(ctx, argv, named) {
@@ -312,6 +350,10 @@ function add_zone_option(ctx, argv, named) {
 			return ctx.invalid_argument('Invalid entry for subnet');
 	}
 
+	for (let key in [ 'network', 'device', 'subnet', 'masq_src', 'masq_dest', 'helper' ])
+		if (named[key] != null)
+			named[key] = normalize_list(named[key]);
+
 	apply_changes(ctx, named, 'zone');
 }
 
@@ -326,6 +368,7 @@ function add_rule_option(ctx, argv, named) {
 	let start_date, stop_date;
 	let src_port, dest_port;
 	let src_ip, dest_ip;
+	let src_mac;
 	let mark;
 
 	monthdays = weekdays = true;
@@ -334,6 +377,7 @@ function add_rule_option(ctx, argv, named) {
 	limit = smark = sxmark = true;
 	src_port = dest_port = true;
 	src_ip = dest_ip = true;
+	src_mac = true;
 	mark = true;
 
 	if (named.limit) {
@@ -354,7 +398,7 @@ function add_rule_option(ctx, argv, named) {
 		sxmark = validateMark(named.set_xmark);
 
 		if (!sxmark)
-			return ctx.invalid_argument('Invalid entry for set_mark');
+			return ctx.invalid_argument('Invalid entry for set_xmark');
 	}
 
 	if (named.monthdays) {
@@ -406,14 +450,17 @@ function add_rule_option(ctx, argv, named) {
 			return ctx.invalid_argument('Invalid entry for mark');
 	}
 
-	if (named.target == 'MARK') {
-		if (!named.set_mark)
-			return ctx.missing_argument('Argument set_mark is missing');
-	}
+	if (named.target == 'MARK' && !named.set_mark && !named.set_xmark)
+		return ctx.missing_argument('Argument set_mark or set_xmark is missing');
 
-	if (named.target == 'MARK') {
-		if (!named.set_xmark)
-			return ctx.missing_argument('Argument set_xmark is missing');
+	if (named.target != 'MARK' && (named.set_mark || named.set_xmark))
+		return ctx.invalid_argument('set_mark and set_xmark require target MARK');
+
+	if (named.src_mac) {
+		src_mac = validateMac(named.src_mac);
+
+		if (!src_mac)
+			return ctx.invalid_argument('Invalid entry for src_mac');
 	}
 
 	if (named.src_port) {
@@ -444,13 +491,17 @@ function add_rule_option(ctx, argv, named) {
 			return ctx.invalid_argument('Invalid entry for dest_ip');
 	}
 
+	for (let key in [ 'src_ip', 'src_mac', 'src_port', 'proto', 'icmp_type', 'dest_ip', 'dest_port' ])
+		if (named[key] != null)
+			named[key] = normalize_list(named[key]);
+
 	apply_changes(ctx, named, 'rule');
 }
 
 function add_ipset_option(ctx, argv, named) {
-	let arr = split(named.entry, ' ');
+	let entries = named.entry != null ? normalize_list(named.entry) : [];
 
-	for (let entry in arr) {
+	for (let entry in entries) {
 		let ipv4 = length(iptoarr(entry)) == 4;
 		let ipv6 = length(iptoarr(entry)) == 16;
 		let cidr4 = parseCidr(entry, 'cidr4');
@@ -464,6 +515,12 @@ function add_ipset_option(ctx, argv, named) {
 		}
 	}
 
+	if (named.entry != null)
+		named.entry = entries;
+
+	if (named.match != null)
+		named.match = normalize_list(named.match);
+
 	apply_changes(ctx, named, 'ipset');
 }
 
@@ -473,13 +530,30 @@ function add_redirect_option(ctx, argv, named) {
 	let start_date, stop_date;
 	let src_port, src_dport, dest_port;
 	let src_ip, src_dip, dest_ip;
+	let src_mac;
 	let mark;
+	let target = named.target ?? 'DNAT';
+
+	if (target == 'SNAT') {
+		if (!named.dest)
+			return ctx.missing_argument('Missing argument: %s', 'dest');
+
+		if (!named.src_dip)
+			return ctx.missing_argument('Missing argument: %s', 'src_dip');
+
+		if (named.src_mac)
+			return ctx.invalid_argument('src_mac cannot be used with target SNAT');
+	}
+	else if (!named.src) {
+		return ctx.missing_argument('Missing argument: %s', 'src');
+	}
 
 	enabled = monthdays = weekdays = true;
 	start_time = stop_time = true;
 	start_date = stop_date = true;
 	src_port = src_dport = dest_port = true;
 	src_ip = src_dip = dest_ip = true;
+	src_mac = true;
 	mark = true;
 
 	if (named.enabled) {
@@ -540,6 +614,13 @@ function add_redirect_option(ctx, argv, named) {
 			return ctx.invalid_argument('Invalid entry for mark');
 	}
 
+	if (named.src_mac) {
+		src_mac = validateMac(named.src_mac);
+
+		if (!src_mac)
+			return ctx.invalid_argument('Invalid entry for src_mac');
+	}
+
 	if (named.src_port) {
 		src_port = validatePort(named.src_port);
 
@@ -582,15 +663,22 @@ function add_redirect_option(ctx, argv, named) {
 			return ctx.invalid_argument('Invalid entry for dest_ip');
 	}
 
+	for (let key in [ 'src_mac', 'proto', 'ipset', 'reflection_zone' ])
+		if (named[key] != null)
+			named[key] = normalize_list(named[key]);
+
 	apply_changes(ctx, named, 'redirect');
 }
 
 function add_include_option(ctx, argv, named) {
-	if (match(named.type, /nftables/) && !named.position)
-		return ctx.missing_argument('Missing argument: %s', 'position');
+	if (named.position && named.type != 'nftables')
+		return ctx.invalid_argument('Position requires type "nftables"');
 
-	if (match(named.position, /^chain-/) && !named.chain)
-			return ctx.missing_argument('Missing argument: %s', 'chain');
+	if (named.chain && !match(named.position, /^chain-/))
+		return ctx.invalid_argument('Chain requires a chain position');
+
+	if (named.position && match(named.position, /^chain-/) && !named.chain)
+		return ctx.missing_argument('Missing argument: %s', 'chain');
 
 	apply_changes(ctx, named, 'include');
 }
@@ -733,22 +821,22 @@ const Add_Fw = {
 			},
 			tcp_reject_code: {
 				required: false,
-				default: 0,
+				default: 'tcp-reset',
 				args: {
 					required: true,
-					type: 'int',
-					min: 0,
-					max: 2,
+					type: 'enum',
+					ignore_case: true,
+					value: [ 'tcp-reset', 'port-unreachable', 'admin-prohibited', 'host-unreachable', 'no-route' ],
 				}
 			},
 			any_reject_code: {
 				required: false,
-				default: 1,
+				default: 'port-unreachable',
 				args: {
 					required: true,
-					type: 'int',
-					min: 0,
-					max: 2,
+					type: 'enum',
+					ignore_case: true,
+					value: [ 'tcp-reset', 'port-unreachable', 'admin-prohibited', 'host-unreachable', 'no-route' ],
 				}
 			},
 			auto_helper: {
@@ -783,6 +871,7 @@ const Add_Fw = {
 			network: {
 				help: 'Specify list of interfaces (e.g. "wan wan6")',
 				required: false,
+				multiple: true,
 				args: {
 					required: true,
 					type: 'string',
@@ -806,6 +895,7 @@ const Add_Fw = {
 			masq_src: {
 				help: 'Specify list of subnets (e.g. 0.0.0.0/0). Negation is also possible.',
 				required: false,
+				multiple: true,
 				default: '0.0.0.0/0',
 				args: {
 					required: true,
@@ -815,6 +905,7 @@ const Add_Fw = {
 			masq_dest: {
 				help: 'Specify list of subnets (e.g. 0.0.0.0/0). Negation is also possible.',
 				required: false,
+				multiple: true,
 				default: '0.0.0.0/0',
 				args: {
 					required: true,
@@ -894,6 +985,7 @@ const Add_Fw = {
 			device: {
 				help: 'List L3 network interface names',
 				required: false,
+				multiple: true,
 				args: {
 					required: true,
 					type: 'string',
@@ -902,6 +994,7 @@ const Add_Fw = {
 			subnet: {
 				help: 'List of IP subnets attached to this zone',
 				required: false,
+				multiple: true,
 				args: {
 					required: true,
 					type: 'string',
@@ -930,10 +1023,11 @@ const Add_Fw = {
 			},
 			helper: {
 				required: false,
+				multiple: true,
 				args: {
 					required: true,
 					type: 'string',
-				}
+				},
 			},
 		},
 		call: add_zone_option,
@@ -1002,6 +1096,7 @@ const Add_Fw = {
 			},
 			src_ip: {
 				required: false,
+				multiple: true,
 				args: {
 					required: true,
 					type: 'string',
@@ -1009,13 +1104,15 @@ const Add_Fw = {
 			},
 			src_mac: {
 				required: false,
+				multiple: true,
 				args: {
 					required: true,
-					type: 'macaddr',
+					type: 'string',
 				}
 			},
 			src_port: {
 				required: false,
+				multiple: true,
 				args: {
 					required: true,
 					type: 'string',
@@ -1023,6 +1120,7 @@ const Add_Fw = {
 			},
 			proto: {
 				required: false,
+				multiple: true,
 				default: 'tcp udp',
 				args: {
 					required: true,
@@ -1031,6 +1129,7 @@ const Add_Fw = {
 			},
 			icmp_type: {
 				required: false,
+				multiple: true,
 				default: 'any',
 				args: {
 					required: true,
@@ -1045,6 +1144,7 @@ const Add_Fw = {
 			},
 			dest_ip: {
 				required: false,
+				multiple: true,
 				args: {
 					required: true,
 					type: 'string',
@@ -1052,6 +1152,7 @@ const Add_Fw = {
 			},
 			dest_port: {
 				required: false,
+				multiple: true,
 				args: {
 					required: true,
 					type: 'string',
@@ -1124,11 +1225,6 @@ const Add_Fw = {
 			},
 			set_mark: {
 				required: false,
-				available: function (ctx, argv, named) {
-					if (named.target == 'MARK')
-						return true;
-					return false;
-				},
 				args: {
 					required: true,
 					type: 'string',
@@ -1136,11 +1232,6 @@ const Add_Fw = {
 			},
 			set_xmark: {
 				required: false,
-				available: function (ctx, argv, named) {
-					if (named.target == 'MARK')
-						return true;
-					return false;
-				},
 				args: {
 					required: true,
 					type: 'string',
@@ -1221,12 +1312,7 @@ const Add_Fw = {
 				}
 			},
 			src: {
-				required: true,
-				available: function (ctx, argv, named) {
-					if (named.target == 'DNAT')
-						return true;
-					return false;
-				},
+				required: false,
 				args: {
 					required: true,
 					type: 'string',
@@ -1240,12 +1326,7 @@ const Add_Fw = {
 				}
 			},
 			src_dip: {
-				required: true,
-				available: function (ctx, argv, named) {
-					if (named.target == 'SNAT')
-						return true;
-					return false;
-				},
+				required: false,
 				args: {
 					required: true,
 					type: 'string',
@@ -1253,9 +1334,10 @@ const Add_Fw = {
 			},
 			src_mac: {
 				required: false,
+				multiple: true,
 				args: {
 					required: true,
-					type: 'macaddr',
+					type: 'string',
 				}
 			},
 			src_port: {
@@ -1274,18 +1356,14 @@ const Add_Fw = {
 			},
 			proto: {
 				required: false,
+				multiple: true,
 				args: {
 					required: true,
 					type: 'string',
 				}
 			},
 			dest: {
-				required: true,
-				available: function (ctx, argv, named) {
-					if (named.target == 'SNAT')
-						return true;
-					return false;
-				},
+				required: false,
 				args: {
 					required: true,
 					type: 'string',
@@ -1307,6 +1385,7 @@ const Add_Fw = {
 			},
 			ipset: {
 				required: false,
+				multiple: true,
 				args: {
 					required: true,
 					type: 'string',
@@ -1370,10 +1449,10 @@ const Add_Fw = {
 			},
 			target: {
 				required: false,
+				default: 'DNAT',
 				args: {
 					required: true,
 					type: 'enum',
-					default: 'DNAT',
 					ignore_case: true,
 					value: [ 'DNAT', 'SNAT' ],
 				}
@@ -1396,11 +1475,6 @@ const Add_Fw = {
 			reflection_src: {
 				required: false,
 				default: 'internal',
-				available: function (ctx, argv, named) {
-					if (named.reflection)
-						return true;
-					return false;
-				},
 				args: {
 					required: true,
 					type: 'enum',
@@ -1409,6 +1483,7 @@ const Add_Fw = {
 			},
 			reflection_zone: {
 				required: false,
+				multiple: true,
 				args: {
 					required: true,
 					type: 'string',
@@ -1451,7 +1526,7 @@ const Add_Fw = {
 	ipset: {
 		help: 'Add ipset to firewall',
 		named_args: {
-			enable: {
+			enabled: {
 				help: 'Allows to disable the declaration of the ipset without the need to delete the section',
 				required: false,
 				default: true,
@@ -1462,7 +1537,7 @@ const Add_Fw = {
 			comment: {
 				required: false,
 				args: {
-					type: 'bool',
+					type: 'string',
 				}
 			},
 			name: {
@@ -1486,6 +1561,7 @@ const Add_Fw = {
 			match: {
 				help: 'Specify the matched datatypes',
 				required: true,
+				multiple: true,
 				args: {
 					required: true,
 					type: 'enum',
@@ -1525,6 +1601,7 @@ const Add_Fw = {
 			entry: {
 				help: 'Specify the value of the datatype (IP, CIDR, MAC)',
 				required: false,
+				multiple: true,
 				args: {
 					required: true,
 					type: 'string',
@@ -1548,7 +1625,7 @@ const Add_Fw = {
 			enabled: {
 				help: 'Allows to disable the corresponding include without having to delete the section',
 				required: false,
-				default: false,
+				default: true,
 				args: {
 					type: 'bool',
 				}
@@ -1574,32 +1651,23 @@ const Add_Fw = {
 			position: {
 				help: 'Specify the position at which the rule will be inserted',
 				required: false,
-				available: function (ctx, argv, named) {
-					if (match(named.type, /nftables/))
-						return true;
-					return false;
-				},
+				default: 'table-append',
 				args: {
 					required: true,
 					type: 'enum',
 					value: [
-					'ruleset-pre',
-					'ruleset-post',
-					'table-pre',
-					'table-post',
-					'chain-pre',
-					'chain-post'
+					'ruleset-prepend',
+					'ruleset-append',
+					'table-prepend',
+					'table-append',
+					'chain-prepend',
+					'chain-append'
 					]
 				}
 			},
 			chain: {
 				help: 'Specify the chain in which the rules will be inserted',
 				required: false,
-				available: function (ctx, argv, named) {
-					if (match(named.position, /^chain-/))
-						return true;
-					return false;
-				},
 				args: {
 					required: true,
 					type: 'string',
